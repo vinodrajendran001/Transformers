@@ -233,3 +233,54 @@ class CTransformer(nn.Module):
         x = self.toprobs(x)
 
         return F.log_softmax(x, dim=1)
+
+
+class GTransformer(nn.Module):
+    """
+    Transformer for generating sequence
+    """
+
+    def __init__(self, emb, heads, depth, seq_length, num_tokens, wide=False):
+        """[summary]
+
+        Args:
+            emb (int): Embedding dimension
+            heads (int): number of attention heads
+            depth (int): number of transformer blocks
+            seq_length (int): expected maximum sequence length
+            num_tokens (int): number of words in the vocabulary
+            wide (bool, optional): Wide or Narrow transformer block. Defaults to False.
+        """
+
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.token_embedding = nn.Embedding(embedding_dim=emb, num_embeddings=num_tokens)
+        self.pos_embedding = nn.Embedding(embedding_dim=emb, num_embeddings=seq_length)
+
+        tblocks = []
+        for i in range(depth):
+            tblocks.append(
+                TransformerBlock(emb=emb, heads=heads, mask=True, seq_length=seq_length, wide=wide)
+            )
+
+        self.tblocks = nn.Sequential(*tblocks)
+        self.toprobs = nn.Linear(emb, num_tokens)
+
+    def forward(self, x):
+        """[summary]
+
+        Args:
+            x : A (batch, sequence length) integer tensor of token indices.
+        """
+
+        tokens = self.token_embedding(x)
+        b, t, e = tokens.size()
+
+        positions = self.pos_embedding(torch.arange(t, device=d()))[None, :, :].expand(b, t, e)
+        x = tokens + positions
+
+        x = self.tblocks(x)
+
+        x = self.toprobs(x.view(b*t, e)).view(b, t, self.num_tokens)
+
+        return F.log_softmax(x, dim=2)        
