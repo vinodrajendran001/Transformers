@@ -161,7 +161,7 @@ if __name__ == "__main__":
 
  
     total_step = len(train_iter)*num_epochs
-    best_val_loss = load_checkpoint(load_model, load_optimizer)
+    best_val_loss = load_checkpoint(load_model, save_path, load_optimizer)
 
     print(best_val_loss)
     eval(load_model, test_iter)
@@ -172,4 +172,4 @@ if __name__ == "__main__":
     plt.plot(train_losses, label='Train Loss')
     plt.plot(val_losses, label="Validation Loss")
     plt.legend(bbox_to_anchor=(1.05, 1.0), loc='upper left')
-    plt.savefig('reports/figures/losscomparison.png')
+    plt.savefig('reports/figures/lossclassifier.png')

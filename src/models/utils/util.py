@@ -41,8 +41,8 @@ def save_checkpoint(save_path, model, optimizer, val_loss):
 
     print(f'Model saved to ==> {save_path}')
 
-def load_checkpoint(model, optimizer):
-    save_path = 'models/CTransformersNet.pt'
+def load_checkpoint(model, save_path, optimizer):
+    # save_path = 'models/CTransformersNet.pt'
     state_dict = torch.load(save_path)
     model.load_state_dict(state_dict['model_state_dict'])
     optimizer.load_state_dict(state_dict['optimizer_state_dict'])

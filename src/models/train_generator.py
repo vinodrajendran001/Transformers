@@ -34,20 +34,20 @@ def sample(lnprobs, temperature=1.0):
 
     return cd.sample()
 
-def trainF(model, data_train, data_test, num_batches, context, test_every, test_subset, test_batchsize, criterion, save_name):
-
+def trainF(model, data_train, data_test, num_batches, refcontext, test_every, test_subset, test_batchsize, criterion, save_name):
+    
     gradient_clipping = 1.0
+    best_bits_per_byte = float("Inf")
+    total_bits = []
+
 
     # training loop
     # - note: we don't loop over the data, instead we sample a batch of random subsequences each time.
     for i in tqdm.trange(num_batches):
-
-        optimizer.zero_grad()
-
         # sample a batch of random subsequences
-        starts = torch.randint(size=(batch_size, ), low=0, high=data_train.size(0) - context - 1)
-        seqs_source = [data_train[start  :start+context  ] for start in starts]
-        seqs_target = [data_train[start+1:start+context+1] for start in starts]
+        starts = torch.randint(size=(batch_size, ), low=0, high=data_train.size(0) - refcontext - 1)
+        seqs_source = [data_train[start  :start+refcontext] for start in starts]
+        seqs_target = [data_train[start+1:start+refcontext+1] for start in starts]
         source = torch.cat([s[None, :] for s in seqs_source ], dim=0).to(torch.long)
         target = torch.cat([s[None, :] for s in seqs_target ], dim=0).to(torch.long)
         # - target is the same sequence as source, except one character ahead
@@ -58,10 +58,11 @@ def trainF(model, data_train, data_test, num_batches, context, test_every, test_
 
         output = model(source)
 
-        loss = criterion(output.transpose(2, 1), target, reduction='mean')
-        
+        loss = criterion(output.transpose(2, 1), target)
 
-        loss.backward()
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()       
 
         # clip gradients
         # - If the total gradient vector has a length > 1, we clip it back down to 1.
@@ -71,7 +72,7 @@ def trainF(model, data_train, data_test, num_batches, context, test_every, test_
         optimizer.step()
         scheduler.step()
 
-        # - validate every {arg.test_every} steps. First we compute the
+        # - validate every {test_every} steps. First we compute the
         #   compression on the validation (or a subset)
         #   then we generate some random text to monitor progress
         if i != 0 and (i % test_every == 0 or i == num_batches - 1):
@@ -85,15 +86,16 @@ def trainF(model, data_train, data_test, num_batches, context, test_every, test_
 
                 for current in range(data_sub.size(0)):
 
-                    fr = max(0, current - context)
+                    fr = max(0, current - refcontext)
                     to = current + 1
 
                     context = data_sub[fr:to].to(torch.long)
-                    if context.size(0) < context + 1:
-                        pad = torch.zeros(size=(context + 1 - context.size(0),), dtype=torch.long)
+                    
+                    if context.size(0) < refcontext + 1:
+                        pad = torch.zeros(size=(refcontext + 1 - context.size(0),), dtype=torch.long)
                         context = torch.cat([pad, context], dim=0)
 
-                        assert context.size(0) == context + 1
+                        assert context.size(0) == refcontext + 1
 
                     if torch.cuda.is_available():
                         context = context.cuda()
@@ -116,17 +118,25 @@ def trainF(model, data_train, data_test, num_batches, context, test_every, test_
 
                         bits += - log2probs.sum()
                         batch = [] # empty buffer
+                        
 
                 bits_per_byte = bits / data_sub.size(0)
+
+                total_bits.append(bits_per_byte)
 
                 # print validation performance. 1 bit per byte is (currently) state of the art.
                 print(f'epoch{i}: {bits_per_byte:.4} bits per byte')
 
+                if bits_per_byte < best_bits_per_byte:
+                  best_bits_per_byte = bits_per_byte
+                  save_checkpoint(save_name, model, optimizer, best_bits_per_byte)
+
+
                 # generate some random text
                 GENSIZE = 600
                 TEMP = 0.5
-                seedfr = random.randint(0, data_test.size(0) - context)
-                input = data_test[seedfr:seedfr + context].to(torch.long)
+                seedfr = random.randint(0, data_test.size(0) - refcontext)
+                input = data_test[seedfr:seedfr + refcontext].to(torch.long)
 
                 if torch.cuda.is_available():
                     input = input.cuda()
@@ -148,6 +158,61 @@ def trainF(model, data_train, data_test, num_batches, context, test_every, test_
                 print()
 
 
+    print("Finished Training")
+    return total_bits
+
+# evaluation metrics
+def eval(model, test_loader):
+    
+    with torch.no_grad():
+        bits = 0.0
+        # batch is full, run it through the model
+        b = len(test_loader)
+
+        all = torch.cat(test_loader, dim=0)
+        source = all[:, :-1] # input
+        target = all[:, -1]  # target values
+
+        output = model(source)
+
+        loss = criterion(output.transpose(2, 1), target)
+        test_loss = loss.item()
+
+        lnprobs = output[torch.arange(b, device=d()), -1, target]
+        log2probs = lnprobs * LOG2E # convert from nats to bits
+
+        bits += - log2probs.sum()
+
+        bits_per_byte = bits / len(test_loader)
+
+        # print test performance. 1 bit per byte is (currently) state of the art.
+        print('{bits_per_byte:.4} bits per byte')
+
+        # generate some random text
+        GENSIZE = 600
+        TEMP = 0.5
+        seedfr = random.randint(0, test_loader.size(0) - refcontext)
+        input = test_loader[seedfr:seedfr + refcontext].to(torch.long)
+
+        if torch.cuda.is_available():
+            input = input.cuda()
+
+        input = Variable(input)
+
+        print('[', end='', flush=True)
+        for c in input:
+            print(str(chr(c)), end='', flush=True)
+        print(']', end='', flush=True)
+
+        for _ in range(GENSIZE):
+            output = model(input[None, :])
+            c = sample(output[0, -1, :], TEMP)
+            print(str(chr(max(32, c))), end='', flush=True)
+
+            input = torch.cat([input[1:], c[None]], dim=0)
+
+        print()  
+
 if __name__ == "__main__":
 
     # NB, the enwik8 data contains tokens from 9 to 240, but well round up to the nearest
@@ -163,18 +228,19 @@ if __name__ == "__main__":
 
     data_train, data_val, data_test = WikipediaDataset(data, n_train, n_valid, n_test)
 
-    data_train, data_test = torch.cat([data_train, data_val], dim=0), data_test 
+    # data_train, data_test = torch.cat([data_train, data_val], dim=0), data_test 
 
 
     embedding_size = 128
     num_heads = 8
     depth = 12
-    context = 256
+    refcontext = 256
     wide = True
 
     batch_size = 32
 
     # create the model
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = GTransformer(emb=embedding_size, heads=num_heads, depth=depth, seq_length=context, num_tokens=NUM_TOKENS, wide=wide)
     if torch.cuda.is_available():
         model.cuda()
@@ -185,11 +251,30 @@ if __name__ == "__main__":
 
     # start training
     optimizer = torch.optim.Adam(lr = 0.0001, params=model.parameters())
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda i: min(i / (10000/batch_size), 1.0))
-    criterion = nn.NLLLoss()
-    num_batches = 10
-    test_every = 1500
-    test_subset = 100000
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda i: min(i / (5000/batch_size), 1.0))
+    criterion = nn.NLLLoss(reduction='mean')
+    num_batches = 10000
+    test_every = 100
+    test_subset = 10000
     test_batchsize = 64
     save_path = 'models/GTransformersNet.pt'
-    train_losses, val_losses = trainF(model, data_train, data_val, num_batches, context, test_every, test_subset, test_batchsize, criterion, save_path)
+    bits_per_byte = trainF(model, data_train, data_val, num_batches, refcontext, test_every, test_subset, test_batchsize, criterion, save_path)
+
+    # Evaluation on previously saved models
+    load_model = GTransformer(emb=embedding_size, heads=num_heads, depth=depth, seq_length=refcontext, num_tokens=NUM_TOKENS, wide=wide)
+    load_model = load_model.to(device)
+    load_optimizer = torch.optim.Adam(load_model.parameters(),lr = 0.0001)
+
+ 
+
+    best_val_loss = load_checkpoint(load_model, save_path, load_optimizer)
+
+    print(best_val_loss)
+    eval(load_model, data_test)
+
+    #plotting of training and validation loss
+    plt.xlabel('epoch')
+    plt.ylabel('bits per byte')
+    plt.plot(bits_per_byte, label='bits_per_byte')
+    plt.legend(bbox_to_anchor=(1.05, 1.0), loc='upper left')
+    plt.savefig('reports/figures/lossgenerator.png')    
