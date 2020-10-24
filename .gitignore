@@ -79,7 +79,7 @@ target/
 /data/
 
 # exclude model file
-*.pt
+/models/
 
 # Mac OS-specific storage files
 .DS_Store
