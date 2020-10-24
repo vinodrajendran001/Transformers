@@ -166,27 +166,36 @@ def eval(model, test_loader):
     
     with torch.no_grad():
         bits = 0.0
+        refcontext = 256
         # batch is full, run it through the model
-        b = len(test_loader)
+        for i in tqdm.trange(test_loader.size(0)):
+          seedfr = random.randint(0, test_loader.size(0) - refcontext)
+          input = test_loader[seedfr:seedfr + refcontext].to(torch.long)
 
-        all = torch.cat(test_loader, dim=0)
-        source = all[:, :-1] # input
-        target = all[:, -1]  # target values
+          context = input
+          b = len(context[None, :])
 
-        output = model(source)
+          if context.size(0) < refcontext + 1:
+              pad = torch.zeros(size=(refcontext + 1 - context.size(0),), dtype=torch.long)
+              context = torch.cat([pad, context], dim=0)
 
-        loss = criterion(output.transpose(2, 1), target)
-        test_loss = loss.item()
+          if torch.cuda.is_available():
+            context = context.cuda()
 
-        lnprobs = output[torch.arange(b, device=d()), -1, target]
-        log2probs = lnprobs * LOG2E # convert from nats to bits
+          source = context[None, :-1] # input
+          target = context[-1]  # target values
 
-        bits += - log2probs.sum()
+          output = model(source)
+
+          lnprobs = output[torch.arange(b, device=d()), -1, target]
+          log2probs = lnprobs * LOG2E # convert from nats to bits
+
+          bits += - log2probs.sum()
 
         bits_per_byte = bits / len(test_loader)
 
         # print test performance. 1 bit per byte is (currently) state of the art.
-        print('{bits_per_byte:.4} bits per byte')
+        print(f'bits per byte: ', bits_per_byte)
 
         # generate some random text
         GENSIZE = 600
@@ -211,7 +220,7 @@ def eval(model, test_loader):
 
             input = torch.cat([input[1:], c[None]], dim=0)
 
-        print()  
+        print() 
 
 if __name__ == "__main__":
 
@@ -228,15 +237,11 @@ if __name__ == "__main__":
 
     data_train, data_val, data_test = WikipediaDataset(data, n_train, n_valid, n_test)
 
-    # data_train, data_test = torch.cat([data_train, data_val], dim=0), data_test 
-
-
     embedding_size = 128
     num_heads = 8
     depth = 12
     refcontext = 256
     wide = True
-
     batch_size = 32
 
     # create the model
@@ -261,16 +266,14 @@ if __name__ == "__main__":
     bits_per_byte = trainF(model, data_train, data_val, num_batches, refcontext, test_every, test_subset, test_batchsize, criterion, save_path)
 
     # Evaluation on previously saved models
-    load_model = GTransformer(emb=embedding_size, heads=num_heads, depth=depth, seq_length=refcontext, num_tokens=NUM_TOKENS, wide=wide)
-    load_model = load_model.to(device)
-    load_optimizer = torch.optim.Adam(load_model.parameters(),lr = 0.0001)
-
- 
+    load_model = GTransformer(emb=embedding_size, heads=num_heads, depth=depth, seq_length=refcontext, num_tokens=NUM_TOKENS, wide=wide).to(device)
+    load_optimizer = torch.optim.Adam(load_model.parameters(), lr=0.0001)
 
     best_val_loss = load_checkpoint(load_model, save_path, load_optimizer)
-
     print(best_val_loss)
-    eval(load_model, data_test)
+
+    test_subset = 10000
+    eval(load_model, data_test[:test_subset])
 
     #plotting of training and validation loss
     plt.xlabel('epoch')
